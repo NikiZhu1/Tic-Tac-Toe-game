@@ -1,6 +1,7 @@
 #include <Windows.h>
 #include <vector>
 #include <fstream>
+#include <sstream>
 #include "json.hpp"
 using json = nlohmann::json;
 
@@ -16,8 +17,91 @@ COLORREF xColor = RGB(255, 255, 255); //Цвет крестика по умолчанию
 COLORREF oColor = RGB(0, 0 ,0); //Цвет нолика по умолчанию
 
 int gridSize = 3; //Размер сетки по умолчанию
+const int MAX_GRID_SIZE = 10; //Максимальный размер сетки
+char board[MAX_GRID_SIZE][MAX_GRID_SIZE]; //Массив для сохранения X и O
 
-std::vector<std::vector<char>> board; //Матрица для хранения положений Х и O
+const wchar_t сlassName[] = L"TicTacToeWindowClass";
+HANDLE hMapping = NULL;
+char* sharedMemory = NULL;
+int sharedMemorySize;
+UINT WM_UPDATE_BOARD = RegisterWindowMessage(L"TicTacToe_UpdateBoard");
+
+//Инициализация общей памяти
+void InitSharedMemory() {
+	sharedMemorySize = MAX_GRID_SIZE * MAX_GRID_SIZE;
+	hMapping = CreateFileMapping(
+		INVALID_HANDLE_VALUE,
+		NULL,
+		PAGE_READWRITE,
+		0,
+		sharedMemorySize,
+		L"Local\\TicTacToeSharedMemory");
+
+	if (hMapping == NULL) {
+		MessageBox(NULL, L"Не удалось создать разделяемую память", L"Ошибка", MB_OK | MB_ICONERROR);
+		return;
+	}
+
+	bool isFirstInstance = (GetLastError() != ERROR_ALREADY_EXISTS);
+	sharedMemory = (char*)MapViewOfFile(hMapping, FILE_MAP_ALL_ACCESS, 0, 0, sharedMemorySize);
+
+	if (sharedMemory == NULL) {
+		MessageBox(NULL, L"Не удалось отобразить разделяемую память", L"Ошибка", MB_OK | MB_ICONERROR);
+		CloseHandle(hMapping);
+		hMapping = NULL;
+		return;
+	}
+
+	if (isFirstInstance) {
+		memset(sharedMemory, '.', sharedMemorySize);
+	}
+
+	// Копируем данные из общей памяти
+	for (int y = 0; y < gridSize; ++y) {
+		for (int x = 0; x < gridSize; ++x) {
+			board[y][x] = sharedMemory[y * MAX_GRID_SIZE + x];
+		}
+	}
+}
+
+//обновление доски
+void UpdateBoard() {
+	if (!sharedMemory) 
+		return;
+
+	for (int y = 0; y < gridSize; ++y) {
+		for (int x = 0; x < gridSize; ++x) {
+			board[y][x] = sharedMemory[y * MAX_GRID_SIZE + x];
+		}
+	}
+}
+
+// Очистка ресурсов
+void CleanupSharedMemory() {
+	if (sharedMemory) {
+		UnmapViewOfFile(sharedMemory);
+		sharedMemory = NULL;
+	}
+	if (hMapping) {
+		CloseHandle(hMapping);
+		hMapping = NULL;
+	}
+}
+
+// Отправляем сообщение всем окнам нашего класса
+void NotifyAllWindows(HWND hwnd) {
+	
+	EnumWindows([](HWND hwndTarget, LPARAM lParam) -> BOOL {
+		wchar_t className[256];
+		GetClassName(hwndTarget, className, 256);
+
+		if (wcscmp(className, сlassName) == 0 && hwndTarget != (HWND)lParam) {
+			PostMessage(hwndTarget, WM_UPDATE_BOARD, 0, 0);
+		}
+		return TRUE;
+		}, 
+	(LPARAM)hwnd);
+}
 
 //проверяем, что строка состоит только из цифр
 bool IsPositiveInteger(LPCWSTR str) {
@@ -41,7 +125,7 @@ void LoadConfig() {
 		file >> config;
 
 		// Проверка gridSize
-		if (config.contains("gridSize") && config["gridSize"].is_number_integer() && config["gridSize"] > 0) { 
+		if (config.contains("gridSize") && config["gridSize"].is_number_integer() && config["gridSize"] > 0 && config["gridSize"] <= 10) {
 			gridSize = config["gridSize"]; 
 		}
 		
@@ -109,6 +193,16 @@ void SaveConfig(HWND hwnd) {
 	file << config.dump(4);
 }
 
+// Закрытие приложения
+void CloseApp(HWND hwnd) {
+	RECT winrect;
+	GetWindowRect(hwnd, &winrect);
+
+	SaveConfig(hwnd); //Сохранение конфига
+	CleanupSharedMemory(); //Очистка общей памяти
+	PostQuitMessage(0); //Выход
+}
+
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
 int WINAPI wWinMain(HINSTANCE hInt, HINSTANCE hPrev, PWSTR pCmdLine, int nShow) {
@@ -119,7 +213,7 @@ int WINAPI wWinMain(HINSTANCE hInt, HINSTANCE hPrev, PWSTR pCmdLine, int nShow) 
 	SoftwareWindClass.hIcon = LoadIcon(NULL, IDI_QUESTION);
 	SoftwareWindClass.hCursor = LoadCursor(NULL, IDC_ARROW);
 	SoftwareWindClass.hInstance = hInt;
-	SoftwareWindClass.lpszClassName = L"MainWindowClass";
+	SoftwareWindClass.lpszClassName = сlassName;
 	SoftwareWindClass.hbrBackground = hBrushBackground;
 	SoftwareWindClass.lpfnWndProc = WindowProc;
 
@@ -136,6 +230,8 @@ int WINAPI wWinMain(HINSTANCE hInt, HINSTANCE hPrev, PWSTR pCmdLine, int nShow) 
 	else if(argc == 2) {
 		if (argv[1] == 0)
 			MessageBoxW(NULL, L"В качестве размера поля не может быть использовано число 0.\n Будет использовано значение из конфигурационного файла либо число 3 по умолчанию.", L"Неверный ввод", MB_OK | MB_ICONWARNING);
+		else if (_wtoi(argv[1]) > MAX_GRID_SIZE)
+			MessageBoxW(NULL, L"Максимальный размер поля: 10.\n Будет использовано значение из конфигурационного файла либо число 3 по умолчанию.", L"Неверный ввод", MB_OK | MB_ICONWARNING);
 		else
 			gridSize = _wtoi(argv[1]);
 	}
@@ -144,20 +240,22 @@ int WINAPI wWinMain(HINSTANCE hInt, HINSTANCE hPrev, PWSTR pCmdLine, int nShow) 
 		return -1;
 	}
 
-	//заполняем матрицу для X и O
-	board = std::vector<std::vector<char>>(gridSize, std::vector<char>(gridSize, '.'));
-
-	CreateWindowW(
-		L"MainWindowClass",
+	HWND hwnd = CreateWindowW(
+		сlassName,
 		L"Игра крестики нолики",
 		WS_OVERLAPPEDWINDOW | WS_VISIBLE,
 		200, 200, //координаты появления
 		baseWindowWidth, baseWindowHeight, //размер окна
 		NULL,
 		NULL,
-		NULL,
+		hInt,
 		NULL
 	);
+
+	if (!hwnd) {
+		MessageBox(NULL, L"Не удалось создать окно", L"Ошибка", MB_OK | MB_ICONERROR);
+		return -1;
+	}
 
 	MSG SoftwareMsg = { 0 };
 	while (GetMessage(&SoftwareMsg, NULL, NULL, NULL)) {
@@ -242,6 +340,18 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 	int cellHeight = winHeight / gridSize; //высота клетки
 
 	switch (uMsg) {
+	case WM_CREATE: {
+		InitSharedMemory(); 
+		InvalidateRect(hwnd, NULL, TRUE);
+		break;
+	}
+	case WM_USER + 1: {
+		for (int y = 0; y < gridSize; ++y)
+			for (int x = 0; x < gridSize; ++x)
+				board[y][x] = sharedMemory[y * gridSize + x];
+		InvalidateRect(hwnd, NULL, TRUE);
+		return 0;
+	}
 	case WM_LBUTTONDOWN:
 	case WM_RBUTTONDOWN:
 	{
@@ -258,11 +368,21 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 		if (boardY >= gridSize - 1)
 			boardY = gridSize - 1;
 
-		//записываем действие в матрицу
-		if (uMsg == WM_LBUTTONDOWN)
-			board[boardY][boardX] = 'O'; 
-		else
-			board[boardY][boardX] = 'X';
+		// Обновляем общую память
+		if (sharedMemory) {
+			if (uMsg == WM_LBUTTONDOWN) {
+				sharedMemory[boardY * MAX_GRID_SIZE + boardX] = 'O';
+			}
+			else {
+				sharedMemory[boardY * MAX_GRID_SIZE + boardX] = 'X';
+			}
+		}
+
+		// Обновляем текущую доску
+		UpdateBoard();
+
+		// Оповещаем все окна об обновлении
+		NotifyAllWindows(hwnd);
 
 		InvalidateRect(hwnd, NULL, TRUE);
 		return 0;
@@ -300,15 +420,14 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 
 		case VK_ESCAPE:
 		{
-			SaveConfig(hwnd); //сохраняем настройки 
-			PostQuitMessage(0);
+			CloseApp(hwnd); 
 			break;
 		}
 		case 'Q':
 		{
-			if ((GetKeyState(VK_CONTROL) & 0x8000))
-				SaveConfig(hwnd); //сохраняем настройки 
-			PostQuitMessage(0);
+			if ((GetKeyState(VK_CONTROL) & 0x8000)) {
+				CloseApp(hwnd); 
+			}
 			break;
 		}
 		case 'C':
@@ -363,16 +482,21 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 		pMinMax->ptMinTrackSize.y = minWindowHeight; // Минимальная высота 
 		return 0;
 	}
-	case WM_SIZE: //при изменении размера перерисовываем всё
+	case WM_SIZE: {
 		InvalidateRect(hwnd, NULL, TRUE);
 		return 0;
-	case WM_DESTROY:
-		RECT winrect; 
-		GetWindowRect(hwnd, &winrect); 
-		SaveConfig(hwnd); //сохраняем настройки
-		PostQuitMessage(0);
+	}
+	case WM_DESTROY: {
+		CloseApp(hwnd);
 		return 0;
-	default:
+	}
+	default: {
+		if (uMsg == WM_UPDATE_BOARD) {
+			UpdateBoard();
+			InvalidateRect(hwnd, NULL, TRUE);
+			return 0;
+		}
 		return DefWindowProc(hwnd, uMsg, wParam, lParam);
+	}
 	}
 }

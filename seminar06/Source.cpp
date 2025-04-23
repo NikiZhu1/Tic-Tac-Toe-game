@@ -1,7 +1,5 @@
 #include <Windows.h>
-#include <vector>
 #include <fstream>
-#include <sstream>
 #include "json.hpp"
 using json = nlohmann::json;
 
@@ -12,6 +10,7 @@ int minWindowWidth = 200, minWindowHeight = 200; //Минимальный размер окна
 
 COLORREF backColor = RGB(45, 73, 255); //Синий цвет окна по умолчанию
 HBRUSH hBrushBackground = CreateSolidBrush(backColor); //Кисть для покраски окна
+void UpdateBackColor(HWND hwnd, COLORREF backcolor); 
 COLORREF lineColor = RGB(255, 48, 55); //Красный цвет линий по умолчанию
 COLORREF xColor = RGB(255, 255, 255); //Цвет крестика по умолчанию
 COLORREF oColor = RGB(0, 0 ,0); //Цвет нолика по умолчанию
@@ -20,21 +19,25 @@ int gridSize = 3; //Размер сетки по умолчанию
 const int MAX_GRID_SIZE = 10; //Максимальный размер сетки
 char board[MAX_GRID_SIZE][MAX_GRID_SIZE]; //Массив для сохранения X и O
 
+struct SharedData {
+	char board[MAX_GRID_SIZE][MAX_GRID_SIZE];
+	COLORREF backColor;
+	COLORREF lineColor;
+};
+
 const wchar_t сlassName[] = L"TicTacToeWindowClass";
 HANDLE hMapping = NULL;
-char* sharedMemory = NULL;
-int sharedMemorySize;
+SharedData* sharedMemory = NULL;
 UINT WM_UPDATE_BOARD = RegisterWindowMessage(L"TicTacToe_UpdateBoard");
 
 //Инициализация общей памяти
-void InitSharedMemory() {
-	sharedMemorySize = MAX_GRID_SIZE * MAX_GRID_SIZE;
+void InitSharedMemory(HWND hwnd) {
 	hMapping = CreateFileMapping(
 		INVALID_HANDLE_VALUE,
 		NULL,
 		PAGE_READWRITE,
 		0,
-		sharedMemorySize,
+		sizeof(SharedData),
 		L"Local\\TicTacToeSharedMemory");
 
 	if (hMapping == NULL) {
@@ -43,7 +46,13 @@ void InitSharedMemory() {
 	}
 
 	bool isFirstInstance = (GetLastError() != ERROR_ALREADY_EXISTS);
-	sharedMemory = (char*)MapViewOfFile(hMapping, FILE_MAP_ALL_ACCESS, 0, 0, sharedMemorySize);
+	sharedMemory = (SharedData*)MapViewOfFile(
+		hMapping, 
+		FILE_MAP_ALL_ACCESS, 
+		0, 
+		0, 
+		sizeof(SharedData)
+	);
 
 	if (sharedMemory == NULL) {
 		MessageBox(NULL, L"Не удалось отобразить разделяемую память", L"Ошибка", MB_OK | MB_ICONERROR);
@@ -53,38 +62,33 @@ void InitSharedMemory() {
 	}
 
 	if (isFirstInstance) {
-		memset(sharedMemory, '.', sharedMemorySize);
+		// Инициализация для первого экземпляра
+		memset(sharedMemory->board, '.', sizeof(sharedMemory->board));
+		sharedMemory->backColor = backColor;
+		sharedMemory->lineColor = lineColor;
 	}
 
 	// Копируем данные из общей памяти
 	for (int y = 0; y < gridSize; ++y) {
 		for (int x = 0; x < gridSize; ++x) {
-			board[y][x] = sharedMemory[y * MAX_GRID_SIZE + x];
+			board[y][x] = sharedMemory->board[y][x];
 		}
 	}
 }
 
 //обновление доски
-void UpdateBoard() {
+void UpdateBoard(HWND hwnd) {
 	if (!sharedMemory) 
 		return;
 
+	backColor = sharedMemory->backColor; 
+	lineColor = sharedMemory->lineColor; 
+	UpdateBackColor(hwnd, backColor);
+
 	for (int y = 0; y < gridSize; ++y) {
 		for (int x = 0; x < gridSize; ++x) {
-			board[y][x] = sharedMemory[y * MAX_GRID_SIZE + x];
+			board[y][x] = sharedMemory->board[y][x];
 		}
-	}
-}
-
-// Очистка ресурсов
-void CleanupSharedMemory() {
-	if (sharedMemory) {
-		UnmapViewOfFile(sharedMemory);
-		sharedMemory = NULL;
-	}
-	if (hMapping) {
-		CloseHandle(hMapping);
-		hMapping = NULL;
 	}
 }
 
@@ -99,8 +103,21 @@ void NotifyAllWindows(HWND hwnd) {
 			PostMessage(hwndTarget, WM_UPDATE_BOARD, 0, 0);
 		}
 		return TRUE;
-		}, 
+	}, 
 	(LPARAM)hwnd);
+}
+
+
+// Очистка ресурсов
+void CleanupSharedMemory() {
+	if (sharedMemory) {
+		UnmapViewOfFile(sharedMemory);
+		sharedMemory = NULL;
+	}
+	if (hMapping) {
+		CloseHandle(hMapping);
+		hMapping = NULL;
+	}
 }
 
 //проверяем, что строка состоит только из цифр
@@ -125,7 +142,7 @@ void LoadConfig() {
 		file >> config;
 
 		// Проверка gridSize
-		if (config.contains("gridSize") && config["gridSize"].is_number_integer() && config["gridSize"] > 0 && config["gridSize"] <= 10) {
+		if (config.contains("gridSize") && config["gridSize"].is_number_integer() && config["gridSize"] > 0 && config["gridSize"] <= MAX_GRID_SIZE) {
 			gridSize = config["gridSize"]; 
 		}
 		
@@ -170,7 +187,7 @@ void LoadConfig() {
 		}
 	}
 	catch (...) { 
-		MessageBox(NULL, L"Не получилось прочитать существующий файл с настройками, будут используются настройки по умолчанию. \n\nПосле закрытия приложения установленные настройки сохранятся и это ошбика пропадёт.", L"Ошибка чтения", MB_OK | MB_ICONWARNING);
+		MessageBox(NULL, L"Не получилось прочитать существующий файл с настройками, будут используются настройки по умолчанию. \n\nПосле закрытия приложения установленные настройки сохранятся и это ошибка пропадёт.", L"Ошибка чтения", MB_OK | MB_ICONWARNING);
 	}
 }
 
@@ -203,6 +220,12 @@ void CloseApp(HWND hwnd) {
 	PostQuitMessage(0); //Выход
 }
 
+void UpdateBackColor(HWND hwnd, COLORREF backcolor) {
+	DeleteObject(hBrushBackground); 
+	hBrushBackground = CreateSolidBrush(backColor); 
+	SetClassLongPtr(hwnd, GCLP_HBRBACKGROUND, (LONG_PTR)hBrushBackground); 
+}
+
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
 int WINAPI wWinMain(HINSTANCE hInt, HINSTANCE hPrev, PWSTR pCmdLine, int nShow) {
@@ -230,8 +253,13 @@ int WINAPI wWinMain(HINSTANCE hInt, HINSTANCE hPrev, PWSTR pCmdLine, int nShow) 
 	else if(argc == 2) {
 		if (argv[1] == 0)
 			MessageBoxW(NULL, L"В качестве размера поля не может быть использовано число 0.\n Будет использовано значение из конфигурационного файла либо число 3 по умолчанию.", L"Неверный ввод", MB_OK | MB_ICONWARNING);
-		else if (_wtoi(argv[1]) > MAX_GRID_SIZE)
-			MessageBoxW(NULL, L"Максимальный размер поля: 10.\n Будет использовано значение из конфигурационного файла либо число 3 по умолчанию.", L"Неверный ввод", MB_OK | MB_ICONWARNING);
+		else if (_wtoi(argv[1]) > MAX_GRID_SIZE) {
+			std::wstring message = L"Максимальный размер поля: " +
+				std::to_wstring(MAX_GRID_SIZE) +
+				L".\nБудет использовано значение из конфигурационного файла либо число 3 по умолчанию.";
+
+			MessageBoxW(NULL, message.c_str(), L"Неверный ввод", MB_OK | MB_ICONWARNING);
+		}
 		else
 			gridSize = _wtoi(argv[1]);
 	}
@@ -341,14 +369,12 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 
 	switch (uMsg) {
 	case WM_CREATE: {
-		InitSharedMemory(); 
+		InitSharedMemory(hwnd); 
 		InvalidateRect(hwnd, NULL, TRUE);
 		break;
 	}
 	case WM_USER + 1: {
-		for (int y = 0; y < gridSize; ++y)
-			for (int x = 0; x < gridSize; ++x)
-				board[y][x] = sharedMemory[y * gridSize + x];
+		UpdateBoard(hwnd);
 		InvalidateRect(hwnd, NULL, TRUE);
 		return 0;
 	}
@@ -371,15 +397,15 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 		// Обновляем общую память
 		if (sharedMemory) {
 			if (uMsg == WM_LBUTTONDOWN) {
-				sharedMemory[boardY * MAX_GRID_SIZE + boardX] = 'O';
+				sharedMemory->board[boardY][boardX] = 'O';
 			}
 			else {
-				sharedMemory[boardY * MAX_GRID_SIZE + boardX] = 'X';
+				sharedMemory->board[boardY][boardX] = 'X';
 			}
 		}
 
 		// Обновляем текущую доску
-		UpdateBoard();
+		UpdateBoard(hwnd);
 
 		// Оповещаем все окна об обновлении
 		NotifyAllWindows(hwnd);
@@ -414,67 +440,75 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 		EndPaint(hwnd, &ps);
 		return 0;
 	}
-	case WM_KEYDOWN: 
+	case WM_KEYDOWN:
 	{
 		switch (wParam) {
 
 		case VK_ESCAPE:
 		{
-			CloseApp(hwnd); 
+			CloseApp(hwnd);
 			break;
 		}
 		case 'Q':
 		{
 			if ((GetKeyState(VK_CONTROL) & 0x8000)) {
-				CloseApp(hwnd); 
+				CloseApp(hwnd);
 			}
 			break;
 		}
-		case 'C':
+		case 'C': {
 			if ((GetKeyState(VK_SHIFT) & 0x8000)) {
-				STARTUPINFOW si = { 0 }; 
+				STARTUPINFOW si = { 0 };
 				PROCESS_INFORMATION pi = { 0 };
-				CreateProcessW(L"c:\\windows\\system32\\notepad.exe", 
+				CreateProcessW(L"c:\\windows\\system32\\notepad.exe",
 					NULL, 0, 0, 0, 0, 0, 0, &si, &pi);
 			}
 			break;
-		case VK_RETURN:
-			backColor = RGB(rand() % 256, rand() % 256, rand() % 256); // Случайный цвет
+		}
+		case VK_RETURN: {
 
-			DeleteObject(hBrushBackground);
-			hBrushBackground = CreateSolidBrush(backColor);
+			if (sharedMemory) {
+				sharedMemory->backColor = RGB(rand() % 256, rand() % 256, rand() % 256); // Случайный цвет
+				backColor = sharedMemory->backColor;
 
-			SetClassLongPtr(hwnd, GCLP_HBRBACKGROUND, (LONG_PTR)hBrushBackground); 
-			InvalidateRect(hwnd, NULL, TRUE); 
+				UpdateBackColor(hwnd, backColor);
+
+				NotifyAllWindows(hwnd);
+				InvalidateRect(hwnd, NULL, TRUE);
+			}
 			break;
 		}
-		return 0;
+			return 0;
+		}
 	}
 	case WM_MOUSEWHEEL:
 	{
-		int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+		if (sharedMemory) {
+			int delta = GET_WHEEL_DELTA_WPARAM(wParam);
 
-		int r = GetRValue(lineColor); 
-		int g = GetGValue(lineColor); 
-		int b = GetBValue(lineColor);  
+			int r = GetRValue(lineColor);
+			int g = GetGValue(lineColor);
+			int b = GetBValue(lineColor);
 
-		int step = 12;
-		// Изменяем цвет в зависимости от направления прокрутки
-		if (delta > 0) {
-			r = (r + step) % 256;
-			g = (g + step / 2) % 256;
-			b = (b + step / 3) % 256;
+			int step = 12;
+			// Изменяем цвет в зависимости от направления прокрутки
+			if (delta > 0) {
+				r = (r + step) % 256;
+				g = (g + step / 2) % 256;
+				b = (b + step / 3) % 256;
+			}
+			else {
+				r = (r - step + 256) % 256;
+				g = (g - step / 2 + 256) % 256;
+				b = (b - step / 3 + 256) % 256;
+			}
+
+			sharedMemory->lineColor = RGB(r, g, b);
+			lineColor = RGB(r, g, b); 
+			NotifyAllWindows(hwnd);
+			InvalidateRect(hwnd, NULL, TRUE); 
 		}
-		else {
-			r = (r - step + 256) % 256;
-			g = (g - step / 2 + 256) % 256;
-			b = (b - step / 3 + 256) % 256;
-		}
-
-		lineColor = RGB(r, g, b); 
-		InvalidateRect(hwnd, NULL, TRUE); 
-
-		return 0;
+		break;
 	}
 	case WM_GETMINMAXINFO: { 
 		MINMAXINFO* pMinMax = (MINMAXINFO*)lParam; 
@@ -492,7 +526,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 	}
 	default: {
 		if (uMsg == WM_UPDATE_BOARD) {
-			UpdateBoard();
+			UpdateBoard(hwnd);
 			InvalidateRect(hwnd, NULL, TRUE);
 			return 0;
 		}
